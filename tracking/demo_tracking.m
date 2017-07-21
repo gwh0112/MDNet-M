@@ -21,8 +21,11 @@ switch(conf.dataset)
         net = fullfile('models','mdnet_vot-otb.mat');
 end
 %% define the initialization for multiple targets. 2 as an example here
-conf.gt = [948,153,154,624; 868,256,84,294];
+% conf.gt = [948,153,154,624; 868,256,84,294];
 %%; 868,256,84,294
-pathSave = [conf.imgDir(1:end-4) 'trackingM/'];
-result = mdnet_run(conf.imgList, conf.gt, net, 1, pathSave);
+pathSave = [conf.imgDir(1:end-4) 'trackingM_withDet/'];
+detPath = fullfile(conf.imgDir(1:end-4),'det/det.txt');
+det = importdata(detPath);
+%visualizeDet(conf.imgList, 1, pathSave, det);
+result = mdnet_run(conf.imgList, net, 1, pathSave, det);
 %result = mdnet_run_ori(conf.imgList, conf.gt, net, 1);

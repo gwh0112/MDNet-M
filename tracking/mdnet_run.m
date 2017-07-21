@@ -1,4 +1,4 @@
-function [ result ] = mdnet_run(images, region, net, display, pathSave)
+function [ result ] = mdnet_run(images, net, display, pathSave, det)
 % MDNET_RUN
 % Main interface for MDNet tracker
 %
@@ -16,17 +16,18 @@ function [ result ] = mdnet_run(images, region, net, display, pathSave)
 
 if(nargin<4), display = true; end
 
+initLoc = det(det(:,1)==1 & det(:,7)>0 ,3:6);
 %% Initialization
 fprintf('Initialization...\n');
 
 nFrames = length(images);
-M = size(region, 1);
+M = size(initLoc, 1);
 
 img = imread(images{1});
 if(size(img,3)==1), img = cat(3,img,img,img); end
 
 
-targetLoc = region;
+targetLoc = initLoc;
 result = zeros(M, nFrames, 4); result(:,1,:) = targetLoc;
 
 [net_conv, net_fc_init, opts] = mdnet_init(img, net);
@@ -75,7 +76,7 @@ for m = 1:M
 
 
     %% Learning CNN
-    fprintf('  training cnn...\n');
+    %fprintf('  training cnn...\n');
     net_fc{m} = mdnet_finetune_hnm(net_fc_init,pos_data,neg_data,opts,...
         'maxiter',opts.maxiter_init,'learningRate',opts.learningRate_init);
 
@@ -122,45 +123,79 @@ end
 
 
 %% Main loop
-for To = 2:nFrames;
+for To = 2:nFrames
     fprintf('Processing frame %d/%d... ', To, nFrames);
     
     img = imread(images{To});
     if(size(img,3)==1), img = cat(3,img,img,img); end
     
+    detLoc = det(det(:,1)==To,3:6);
     spf = tic;
     %% Estimation
     
     for m = 1:M
-        % draw target candidates
-        samples = gen_samples('gaussian', targetLoc(m,:), opts.nSamples, opts, trans_f(m), scale_f(m));
-        feat_conv = mdnet_features_convX(net_conv, img, samples, opts);
-
-        % evaluate the candidates
-        feat_fc = mdnet_features_fcX(net_fc{m}, feat_conv, opts);
-        feat_fc = squeeze(feat_fc)';
-        [scores,idx] = sort(feat_fc(:,2),'descend');
-        target_score = mean(scores(1:5));
-        targetLoc(m,:) = round(mean(samples(idx(1:5),:)));
-
-        % final target
-        result(m,To,:) = targetLoc(m,:);
-
-        % extend search space in case of failure
-        if(target_score<0)
-            trans_f(m) = min(1.5, 1.1*trans_f(m));
+        %check the detection result first
+        r = overlap_ratio(detLoc,result(m,To-1,:));
+        samples = detLoc(r>0.7,:);
+        if size(samples,1) > 0
+            feat_conv = mdnet_features_convX(net_conv, img, samples, opts);
+            feat_fc = mdnet_features_fcX(net_fc{m}, feat_conv, opts);
+            feat_fc = squeeze(feat_fc)';
+            [scores,idx] = sort(feat_fc(:,2),'descend');
+            target_score = scores(1);
         else
-            trans_f(m) = opts.trans_f;
+            target_score = -1;
+        end
+        
+        if target_score > 0
+            targetLoc(m,:) = samples(1,:);
+            result(m,To,:) = targetLoc(m,:);
+            fprintf('Detection');
+        else
+            fprintf('Tracking');
+    % draw target candidates
+    %         if success_frames{m}(end) == To-1
+    %             r = overlap_ratio(detLoc,result(m,To-1,:));
+    %             samples_det = detLoc(r>0,:);
+    %         else
+    %             samples_det = detLoc;
+    %         end
+            samples = gen_samples('gaussian', targetLoc(m,:), opts.nSamples, opts, trans_f(m), scale_f(m));
+    %         samples = [samples; samples_det];
+            feat_conv = mdnet_features_convX(net_conv, img, samples, opts);
+
+            % evaluate the candidates
+            feat_fc = mdnet_features_fcX(net_fc{m}, feat_conv, opts);
+            feat_fc = squeeze(feat_fc)';
+            [scores,idx] = sort(feat_fc(:,2),'descend');
+            target_score = mean(scores(1:5));
+            targetLoc(m,:) = round(mean(samples(idx(1:5),:)));
+
+            % final target
+    %         if target_score > 0
+    %             result(m,To,:) = targetLoc(m,:);
+    %         else
+    %             result(m,To,:) = result(m,To-1,:);
+    %         end
+            result(m,To,:) = targetLoc(m,:);
+                    % extend search space in case of failure
+            if(target_score<0)
+                trans_f(m) = min(1.5, 1.1*trans_f(m));
+            else
+                trans_f(m) = opts.trans_f;
+            end
+
+            % bbox regression
+            if(opts.bbreg && target_score>0)
+                X_ = permute(gather(feat_conv(:,:,:,idx(1:5))),[4,3,1,2]);
+                X_ = X_(:,:);
+                bbox_ = samples(idx(1:5),:);
+                pred_boxes = predict_bbox_regressor(bbox_reg{m}.model, X_, bbox_);
+                result(m,To,:) = round(mean(pred_boxes,1));
+            end
         end
 
-        % bbox regression
-        if(opts.bbreg && target_score>0)
-            X_ = permute(gather(feat_conv(:,:,:,idx(1:5))),[4,3,1,2]);
-            X_ = X_(:,:);
-            bbox_ = samples(idx(1:5),:);
-            pred_boxes = predict_bbox_regressor(bbox_reg{m}.model, X_, bbox_);
-            result(m,To,:) = round(mean(pred_boxes,1));
-        end
+
 
         %% Prepare training data
         if(target_score>0)
